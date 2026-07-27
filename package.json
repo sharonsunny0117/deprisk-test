@@ -1,0 +1,13 @@
+{
+  "name": "deprisk-cli",
+  "version": "1.0.0",
+  "description": "CLI dependency vulnerability scanner with CI/CD gating and SARIF export",
+  "main": "deprisk.js",
+  "bin": {
+    "deprisk": "./deprisk.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}

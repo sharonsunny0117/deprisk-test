@@ -1,0 +1,47 @@
+name: Dependency Risk Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  scan:
+    name: Scan dependencies for known vulnerabilities
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run dependency scan
+        id: scan
+        run: |
+          node deprisk.js \
+            --path requirements.txt \
+            --fail-on high \
+            --sarif-out results.sarif
+          echo "scan_exit_code=$?" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+
+      - name: Enforce gate
+        if: steps.scan.outputs.scan_exit_code != '0'
+        run: |
+          echo "Blocking: dependency scan found High/Critical vulnerabilities."
+          exit 1
