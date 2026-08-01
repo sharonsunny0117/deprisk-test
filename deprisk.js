@@ -36,7 +36,8 @@ DEPRISK CLI — dependency vulnerability scanner
 
 Options:
   --path <file>         Manifest file to scan (repeatable). Supports package.json,
-                         requirements.txt, pom.xml.
+                         package-lock.json (recommended — includes transitive
+                         dependencies), requirements.txt, pom.xml.
   --fail-on <level>     Exit non-zero if any finding is at/above this severity.
                          One of: critical, high, medium, low, none (default: high)
   --sarif-out <file>    Write results in SARIF format to this path (for GitHub
@@ -52,6 +53,7 @@ Example:
 // ---------------- Parsers (same logic as the browser dashboard) ----------------
 function detectKind(filename) {
   const f = filename.toLowerCase();
+  if (f.endsWith('package-lock.json')) return 'npm-lock';
   if (f.endsWith('package.json')) return 'npm';
   if (f.includes('requirements') && f.endsWith('.txt')) return 'pypi';
   if (f.endsWith('pom.xml')) return 'maven';
@@ -64,6 +66,43 @@ function cleanNpmVersion(v) {
   let cleaned = v.trim().replace(/^[~^>=<\s]+/, '').split(/[\s|<>]/)[0].replace(/\.x$/, '').replace(/\.\*$/, '');
   if (!/^\d+\.\d+\.\d+/.test(cleaned)) return null;
   return cleaned;
+}
+
+// Reads package-lock.json — this is what makes the scanner see TRANSITIVE
+// (indirect) dependencies, not just what's declared in package.json. Most
+// real-world CVEs live here, not in the top-level manifest.
+//
+// Handles two lockfile shapes:
+//  - Modern (npm v7+, lockfileVersion 2 or 3): a flat "packages" object keyed
+//    by install path, e.g. "node_modules/lodash" or
+//    "node_modules/@scope/name" or nested "node_modules/a/node_modules/b".
+//  - Legacy (npm v5/v6, lockfileVersion 1): a nested "dependencies" tree,
+//    where each dependency can itself contain a "dependencies" object for
+//    its own children — walked recursively.
+function parsePackageLockJson(text, filename) {
+  const deps = [];
+  let json;
+  try { json = JSON.parse(text); } catch (e) { warn(`${filename}: invalid JSON — skipped.`); return deps; }
+
+  if (json.packages) {
+    Object.entries(json.packages).forEach(([installPath, info]) => {
+      if (!installPath || !info || !info.version) return; // "" is the root project itself — skip
+      const idx = installPath.lastIndexOf('node_modules/');
+      if (idx === -1) return;
+      const name = installPath.slice(idx + 'node_modules/'.length);
+      deps.push({ name, version: info.version, ecosystem: 'npm', source: filename });
+    });
+  } else if (json.dependencies) {
+    (function walk(depsObj) {
+      Object.entries(depsObj).forEach(([name, info]) => {
+        if (info && info.version) deps.push({ name, version: info.version, ecosystem: 'npm', source: filename });
+        if (info && info.dependencies) walk(info.dependencies);
+      });
+    })(json.dependencies);
+  } else {
+    warn(`${filename}: unrecognized lockfile format — no "packages" or "dependencies" key found.`);
+  }
+  return deps;
 }
 
 function parsePackageJson(text, filename) {
@@ -226,6 +265,10 @@ async function fetchAllDetails(ids) {
 }
 
 // ---------------- SARIF export ----------------
+// SARIF (Static Analysis Results Interchange Format) is the JSON schema GitHub
+// Code Scanning, GitLab, and most security dashboards understand natively.
+// Producing this is what makes a tool "pluggable" into a real pipeline instead
+// of a standalone report nobody automated ever reads.
 function toSARIF(findings) {
   const severityToSarifLevel = { CRITICAL: 'error', HIGH: 'error', MEDIUM: 'warning', LOW: 'note' };
   const rules = [];
@@ -233,13 +276,21 @@ function toSARIF(findings) {
   findings.forEach(f => {
     if (!seenRules.has(f.vulnId)) {
       seenRules.add(f.vulnId);
+      // GitHub's SARIF validator expects "security-severity" to be a valid
+      // numeric string if present at all — an empty string is invalid and
+      // triggers a "tool is reporting errors" configuration warning on the
+      // whole run. So when we have no computed CVSS score (advisory-reported
+      // severity only), we omit the property entirely rather than setting
+      // it to ''.
+      const properties = {};
+      if (f.score !== null) properties['security-severity'] = String(f.score);
       rules.push({
         id: f.vulnId,
         name: f.vulnId,
         shortDescription: { text: f.summary.slice(0, 120) },
         fullDescription: { text: f.summary },
         helpUri: f.link,
-        properties: { 'security-severity': f.score !== null ? String(f.score) : '' }
+        properties
       });
     }
   });
@@ -288,7 +339,8 @@ async function main() {
     const kind = detectKind(filename);
     if (!kind) { warn(`Unrecognized manifest type: ${filename}`); continue; }
     const text = fs.readFileSync(p, 'utf8');
-    if (kind === 'npm') allDeps = allDeps.concat(parsePackageJson(text, filename));
+    if (kind === 'npm-lock') allDeps = allDeps.concat(parsePackageLockJson(text, filename));
+    else if (kind === 'npm') allDeps = allDeps.concat(parsePackageJson(text, filename));
     else if (kind === 'pypi') allDeps = allDeps.concat(parseRequirementsTxt(text, filename));
     else if (kind === 'maven') allDeps = allDeps.concat(parsePomXml(text, filename));
   }
@@ -365,6 +417,8 @@ async function main() {
     console.log(`SARIF written to ${args.sarifOut}`);
   }
 
+  // ---- Gating logic: this is the actual "DevSecOps" part ----
+  // Decide whether this scan should FAIL the pipeline based on --fail-on.
   const thresholds = { critical: 4, high: 3, medium: 2, low: 1, none: 99 };
   const thresholdRank = thresholds[args.failOn] ?? 3;
   const worstFinding = findings.reduce((max, f) => Math.max(max, severityRank[f.bucket]), 0);
