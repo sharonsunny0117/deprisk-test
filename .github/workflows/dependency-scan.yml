@@ -25,23 +25,10 @@ jobs:
           node-version: '20'
 
       - name: Run dependency scan
-        id: scan
-        run: |
-          node deprisk.js \
-            --path requirements.txt \
-            --fail-on high \
-            --sarif-out results.sarif
-          echo "scan_exit_code=$?" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
+        run: node deprisk.js --path requirements.txt --fail-on high --sarif-out results.sarif
 
       - name: Upload SARIF to GitHub Security tab
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
-
-      - name: Enforce gate
-        if: steps.scan.outputs.scan_exit_code != '0'
-        run: |
-          echo "Blocking: dependency scan found High/Critical vulnerabilities."
-          exit 1
