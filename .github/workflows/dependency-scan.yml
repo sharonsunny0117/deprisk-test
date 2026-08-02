@@ -25,7 +25,7 @@ jobs:
           node-version: '20'
 
       - name: Run dependency scan
-        run: node deprisk.js --path requirements.txt --path package-lock.json --fail-on high --sarif-out results.sarif
+        run: node deprisk.js --path requirements.txt --path package-lock.json --path nodegoat-package.json --fail-on high --sarif-out results.sarif
 
       - name: Upload SARIF to GitHub Security tab
         if: always()
